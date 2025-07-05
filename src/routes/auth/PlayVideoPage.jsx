@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from "react";
-import { useParams, useNavigate } from "react-router";
+import { useParams, useNavigate, replace } from "react-router";
+import { useSelector } from "react-redux";
 import { Container, Row, Col, Button, Spinner } from "react-bootstrap";
 import videojs from "video.js";
 import "video.js/dist/video-js.css";
@@ -7,19 +8,24 @@ import "../../util/hls-selector/plugin";
 import "../../util/videojs-hotkey/videojs.hotkeys"
 import axiosClient from "../../util/axiosClient";
 import ShareModal from "./ShareModal";
-// import hlsQualitySelector from "videojs-hls-quality-selector";
+import CreateRoomModal from "./CreateRoomModal";
 
 
 const PlayVideoPage = () => {
-    const { videoId } = useParams();
+    const { videoId, room } = useParams();
     const navigate = useNavigate();
     const playerRef = useRef(null);
     const videoNodeRef = useRef(null);
 
+    const user = useSelector((state) => state.auth.user);
     const [showShareModal, setShowShareModal] = useState(false); 
     const [shareModalMessage, setShareModalMessage] = useState("");
     const [externalUserAccessList, setExternalUserAccessList] = useState([])
-    
+    const [currentRoom, setCurrentRoom] = useState(null);
+    const [showCreateRoomModal, setShowCreateRoomModal] = useState(false);
+    const [joiningRoom, setJoiningRoom] = useState(false);
+    const [videoLoaded, setVideoLoaded] = useState(false);
+
     const handleAddUser = (user) => {
         axiosClient.post("/media/share/user", {mediaId:videoId, username: user}).then((resp) => {
             const data = resp.data;
@@ -50,9 +56,45 @@ const PlayVideoPage = () => {
         })
     }
 
+    const handleCreateRoom = (roomName) => {
+        setJoiningRoom(true);
+        axiosClient.post("/media/room/create", { mediaId: videoId, roomName }).then((resp) => {
+            const data = resp.data;
+            if (data.roomName) {
+                setCurrentRoom(data.roomName);
+                setShowCreateRoomModal(false);
+            } else {
+                alert("Unable to create room! Try again!");
+            }
+        });
+    };
+
     const [videoData, setVideoData] = useState(null);
     const [error, setError] = useState(false);
     const [loading, setLoading] = useState(true);
+
+    
+    useEffect(() => {
+        if (room !== undefined && room !== null && room !== "" && videoLoaded) {
+            console.log("ok")
+            playerRef.current.pause()
+            setJoiningRoom(true);
+            axiosClient.post("/media/room/join", { mediaId: videoId, roomName: room }).then((resp) => {
+                const data = resp.data;
+                console.log(data);
+                if (data.roomAvailable) {
+                    setJoiningRoom(false);
+                } else {
+                    setJoiningRoom(false);
+                    alert("Unable to join room! Try again!");
+                    navigate(`/watch/${videoId}`, {replace:true});
+                }
+            }).catch((error) => {
+                navigate(`/watch/${videoId}`, {replace:true});
+                setJoiningRoom(false);
+            })
+        }
+    }, [room, videoLoaded])
 
     useEffect(() => {
         const fetchVideoDetails = async () => {
@@ -65,6 +107,7 @@ const PlayVideoPage = () => {
                     console.log(data)
                     setExternalUserAccessList(data.externalUserAccessList)
                     setVideoData(data);
+                    setCurrentRoom(data.currentRoom ?? null);
                 }
             } catch (err) {
                 setError(true);
@@ -101,6 +144,13 @@ const PlayVideoPage = () => {
                 },
             });
 
+            player.on('pause', () => {
+                console.log('Video paused');
+            });
+            player.on('seeked', () => {
+                console.log('Video seeked to', player.currentTime());
+            });
+
             // player.ready(() => {
             //     this.hotkeys({volumeStep: 0.1,
             //             seekStep: 5,
@@ -108,6 +158,7 @@ const PlayVideoPage = () => {
             // })
 
             playerRef.current = player;
+            setVideoLoaded(true);
 
             return () => {
                 if (playerRef.current) {
@@ -158,9 +209,30 @@ const PlayVideoPage = () => {
                     <Button variant="outline-primary" onClick={() => setShowShareModal(true)}>
                         Share
                     </Button>
-                    <Button variant="outline-success">
-                        Create a Room
-                    </Button>
+                    {room && room !== "" ? (
+                        <Button variant="outline-danger" onClick={() => navigate(`/watch/${videoId}`, {replace:true})} >
+                            Leave Room
+                        </Button>
+                    ) : videoData.owner === user ? (
+                        !currentRoom || currentRoom === "" ? (
+                            <Button variant="outline-success" onClick={() => setShowCreateRoomModal(true)}>
+                                Create a Room
+                            </Button>
+                        ) : (
+                            <>
+                                <Button variant="outline-success" onClick={() => navigate(`/watch/${videoId}/${currentRoom}`)}>
+                                    Join Room
+                                </Button>
+                                <Button variant="outline-danger">
+                                    Delete Room
+                                </Button>
+                            </>
+                        )
+                    ) : (
+                        <Button variant="outline-success" disabled={!currentRoom || currentRoom === ""}>
+                            Join Room
+                        </Button>
+                    )}
                 </div>
             </Col>
             <ShareModal
@@ -172,6 +244,25 @@ const PlayVideoPage = () => {
                 message={shareModalMessage}
                 setMessage={setShareModalMessage}
             />
+            <CreateRoomModal
+                show={showCreateRoomModal}
+                onHide={() => setShowCreateRoomModal(false)}
+                onCreate={handleCreateRoom}
+            />
+            { joiningRoom && (
+                <Container className="d-flex justify-content-center align-items-center" 
+                style={{
+                    position: "fixed",
+                    top: 0,
+                    left: 0,
+                    width: "100vw",
+                    height: "100vh",
+                    backgroundColor: "rgba(255, 255, 255, 0.7)", // optional: white translucent overlay
+                    zIndex: 9999
+                }}>
+                    <Spinner animation="border" />
+                </Container>
+            )}
         </Row>
     );
 };

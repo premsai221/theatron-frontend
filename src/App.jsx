@@ -23,7 +23,7 @@ function App() {
           <Route element={<AuthNavBar />}>
             <Route path='/dashboard' element={<Dashboard/>}/>
             <Route path='/upload' element={<VideoUploadPage/>} />
-            <Route path='/watch/:videoId' element={<PlayVideoPage />} />
+            <Route path='/watch/:videoId/:room?' element={<PlayVideoPage />} />
           </Route>
         </Routes>
     </>
