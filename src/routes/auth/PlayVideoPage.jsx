@@ -25,13 +25,17 @@ const PlayVideoPage = () => {
     const [showCreateRoomModal, setShowCreateRoomModal] = useState(false);
     const [joiningRoom, setJoiningRoom] = useState(false);
     const [videoLoaded, setVideoLoaded] = useState(false);
+    const [roomSessionConnected, setRoomSessionConnected] = useState(false);
+
+    const socketRef = useRef(null);
+    const latestMessageTimestamp = useRef(Date.now());
 
     const handleAddUser = (user) => {
         axiosClient.post("/media/share/user", {mediaId:videoId, username: user}).then((resp) => {
             const data = resp.data;
             if (data.updatedAccessList != undefined) {
                 setShareModalMessage("User has been added succesfully");
-                setExternalUserAccessList(data.updatedAccessList)
+                setExternalUserAccessList(data.updatedAccessList ?? [])
             } else {
                 setShareModalMessage("Unable to add user! Try again!");
             }
@@ -46,7 +50,7 @@ const PlayVideoPage = () => {
             const data = resp.data;
             if (data.updatedAccessList != undefined) {
                 setShareModalMessage("User has been removed succesfully");
-                setExternalUserAccessList(data.updatedAccessList)
+                setExternalUserAccessList(data.updatedAccessList ?? [])
             } else {
                 setShareModalMessage("Unable to remove user! Try again!");
             }
@@ -73,8 +77,105 @@ const PlayVideoPage = () => {
     const [error, setError] = useState(false);
     const [loading, setLoading] = useState(true);
 
+    console.log(roomSessionConnected)
+
+    const checkIfConnectionToRoomAcknowledged = () => {
+        return setTimeout(() => {
+            if (!roomSessionConnected) {
+                console.log("Connection to room not acknowledged, closing socket");
+                if (socketRef.current) {
+                    socketRef.current.close();
+                }
+                setJoiningRoom(false);
+                navigate(`/watch/${videoId}`, {replace:true});
+            }
+        }, 4000);
+    }
+
+    function handleMessage(message) {
+        if (
+            !playerRef.current ||
+            !message ||
+            message.from === user ||
+            message.to !== "!ALL!" ||
+            message.to !== user
+        ) {
+            return;
+        }
+
+        if (!roomSessionConnected && message.type !== "ACK" ) {
+            return;
+        }
+
+        if (message.type === "ACK") {
+            setRoomSessionConnected(true);
+        }
+
+        if (message.type === "SYNC" && videoData.owner === user) {
+            const syncMessage = {
+                action: "SYNC",
+                from: user,
+                to: message.from,
+                currentTimeMs: playerRef.current.currentTime() * 1000,
+                timestamp: Date.now(),
+            };
+            socketRef.current.send(JSON.stringify(syncMessage));
+            return;
+        }
+
+        console.log("WebSocket message received:", message);
+
+        if (latestMessageTimestamp.current >= message.timestamp)
+            return; 
+        
+        const now = Date.now();
+        const delta = now - message.timestamp;
+        const seekTime = (message.currentTimeMs + delta) / 1000;
+
+        playerRef.current.currentTime(seekTime);
+
+        if (message.action === "PAUSE") {
+            playerRef.current.pause();
+        } else if (message.action === "PLAY") {
+            playerRef.current.play();
+        }
+        latestMessageTimestamp.current = message.timestamp;
+    }
+
+    const connectToWebSocket = (token) => {
+        const socket = new WebSocket(`ws://127.0.0.1:8081/ws`);
+
+        socket.onopen = () => {
+            console.log("WebSocket connection established.");
+            socket.send(token);
+            if (videoData.owner != user) {
+                const syncMessage = {
+                    action: "SYNC",
+                    to: "!HOST!",
+                    from: user,
+                }
+                socket.send(JSON.stringify(syncMessage));
+            }
+        };
+
+        socket.onmessage = (event) => {
+            const message = JSON.parse(event.data);
+            handleMessage(message)
+        };
+
+        socket.onerror = (error) => {
+            console.log("WebSocket error:", error);
+        };
+
+        socket.onclose = (event) => {
+            console.log("WebSocket closed:", event);
+        };
+
+        return socket;
+    }
     
     useEffect(() => {
+        var timeoutRef = null;
         if (room !== undefined && room !== null && room !== "" && videoLoaded) {
             console.log("ok")
             playerRef.current.pause()
@@ -83,6 +184,8 @@ const PlayVideoPage = () => {
                 const data = resp.data;
                 console.log(data);
                 if (data.roomAvailable) {
+                    socketRef.current = connectToWebSocket(data.token);
+                    timeoutRef = checkIfConnectionToRoomAcknowledged();
                     setJoiningRoom(false);
                 } else {
                     setJoiningRoom(false);
@@ -94,6 +197,16 @@ const PlayVideoPage = () => {
                 setJoiningRoom(false);
             })
         }
+        return () => {
+            if (socketRef.current) {
+                socketRef.current.close();
+                setJoiningRoom(false);
+                setRoomSessionConnected(false);
+                if (timeoutRef) {
+                    clearTimeout(timeoutRef);
+                }
+            }
+        };
     }, [room, videoLoaded])
 
     useEffect(() => {
@@ -105,7 +218,7 @@ const PlayVideoPage = () => {
                     setError(true);
                 } else {
                     console.log(data)
-                    setExternalUserAccessList(data.externalUserAccessList)
+                    setExternalUserAccessList(data.externalUserAccessList ?? [])
                     setVideoData(data);
                     setCurrentRoom(data.currentRoom ?? null);
                 }
@@ -229,7 +342,7 @@ const PlayVideoPage = () => {
                             </>
                         )
                     ) : (
-                        <Button variant="outline-success" disabled={!currentRoom || currentRoom === ""}>
+                        <Button variant="outline-success" disabled={!currentRoom || currentRoom === ""} onClick={() => navigate(`/watch/${videoId}/${currentRoom}`)}>
                             Join Room
                         </Button>
                     )}
