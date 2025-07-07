@@ -25,10 +25,11 @@ const PlayVideoPage = () => {
     const [showCreateRoomModal, setShowCreateRoomModal] = useState(false);
     const [joiningRoom, setJoiningRoom] = useState(false);
     const [videoLoaded, setVideoLoaded] = useState(false);
-    const [roomSessionConnected, setRoomSessionConnected] = useState(false);
+    const roomSessionConnected = useRef(false);
 
     const socketRef = useRef(null);
     const latestMessageTimestamp = useRef(Date.now());
+    const nonUserActions = useRef(0)
 
     const handleAddUser = (user) => {
         axiosClient.post("/media/share/user", {mediaId:videoId, username: user}).then((resp) => {
@@ -70,18 +71,33 @@ const PlayVideoPage = () => {
             } else {
                 alert("Unable to create room! Try again!");
             }
+            console.log(data);
+            setJoiningRoom(false);
+        }).catch((error) => {
+            console.log(error);
+            setJoiningRoom(false);
         });
     };
+
+    const handleDeleteRoom = () => {
+        axiosClient.post("/media/room/delete", { mediaId: videoId, roomName: currentRoom }).then((resp) => {
+            const data = resp.data;
+            console.log(data);
+            if (data.roomName) {
+                setCurrentRoom(null);
+            } else {
+                alert("Unable to delete room! Try again!");
+            }
+        });
+    }
 
     const [videoData, setVideoData] = useState(null);
     const [error, setError] = useState(false);
     const [loading, setLoading] = useState(true);
 
-    console.log(roomSessionConnected)
-
     const checkIfConnectionToRoomAcknowledged = () => {
         return setTimeout(() => {
-            if (!roomSessionConnected) {
+            if (!roomSessionConnected.current) {
                 console.log("Connection to room not acknowledged, closing socket");
                 if (socketRef.current) {
                     socketRef.current.close();
@@ -96,24 +112,26 @@ const PlayVideoPage = () => {
         if (
             !playerRef.current ||
             !message ||
-            message.from === user ||
-            message.to !== "!ALL!" ||
-            message.to !== user
+            message.from === user || 
+            (message.to !== "!ALL!" &&
+            message.to !== user && (message.to === "!HOST!" && videoData.owner !== user))
         ) {
             return;
         }
 
-        if (!roomSessionConnected && message.type !== "ACK" ) {
+        if (!roomSessionConnected.current && message.type !== "ACK" ) {
             return;
         }
 
         if (message.type === "ACK") {
-            setRoomSessionConnected(true);
+            roomSessionConnected.current = true;
+            playerRef.current.play();
         }
-
+        
         if (message.type === "SYNC" && videoData.owner === user) {
+            console.log(playerRef.current.currentTime())
             const syncMessage = {
-                action: "SYNC",
+                type: "ACK",
                 from: user,
                 to: message.from,
                 currentTimeMs: playerRef.current.currentTime() * 1000,
@@ -130,13 +148,18 @@ const PlayVideoPage = () => {
         
         const now = Date.now();
         const delta = now - message.timestamp;
-        const seekTime = (message.currentTimeMs + delta) / 1000;
+        const seekTime = parseInt((message.currentTimeMs + delta) / 1000);
 
+        console.log(1, nonUserActions.current)
         playerRef.current.currentTime(seekTime);
-
+        nonUserActions.current++;
         if (message.action === "PAUSE") {
+            nonUserActions.current++;
+            console.log(3, nonUserActions.current)
             playerRef.current.pause();
         } else if (message.action === "PLAY") {
+            nonUserActions.current++;
+            console.log(5, nonUserActions.current)
             playerRef.current.play();
         }
         latestMessageTimestamp.current = message.timestamp;
@@ -150,7 +173,7 @@ const PlayVideoPage = () => {
             socket.send(token);
             if (videoData.owner != user) {
                 const syncMessage = {
-                    action: "SYNC",
+                    type: "SYNC",
                     to: "!HOST!",
                     from: user,
                 }
@@ -185,7 +208,11 @@ const PlayVideoPage = () => {
                 console.log(data);
                 if (data.roomAvailable) {
                     socketRef.current = connectToWebSocket(data.token);
-                    timeoutRef = checkIfConnectionToRoomAcknowledged();
+                    if (videoData.owner !== user) {
+                        timeoutRef = checkIfConnectionToRoomAcknowledged();
+                    } else {
+                        roomSessionConnected.current = true;
+                    }
                     setJoiningRoom(false);
                 } else {
                     setJoiningRoom(false);
@@ -201,7 +228,7 @@ const PlayVideoPage = () => {
             if (socketRef.current) {
                 socketRef.current.close();
                 setJoiningRoom(false);
-                setRoomSessionConnected(false);
+                roomSessionConnected.current = false;
                 if (timeoutRef) {
                     clearTimeout(timeoutRef);
                 }
@@ -257,11 +284,54 @@ const PlayVideoPage = () => {
                 },
             });
 
+            player.on('play', () => {
+                console.log(6, nonUserActions.current)
+                if (nonUserActions.current == 0 && roomSessionConnected.current) {
+                    const message = {
+                        type: "CTRL",
+                        action: "PLAY",
+                        from: user,
+                        to: "!ALL!",
+                        currentTimeMs: player.currentTime() * 1000,
+                        timestamp: Date.now(),
+                    };
+                    socketRef.current.send(JSON.stringify(message));
+                } else {
+                    nonUserActions.current--;
+                }
+            })
+
             player.on('pause', () => {
-                console.log('Video paused');
+                console.log(4, nonUserActions.current)
+                if (nonUserActions.current == 0 && roomSessionConnected.current) {
+                    const message = {
+                        type: "CTRL",
+                        action: "PAUSE",
+                        from: user,
+                        to: "!ALL!",
+                        currentTimeMs: player.currentTime() * 1000,
+                        timestamp: Date.now(),
+                    };
+                    socketRef.current.send(JSON.stringify(message));
+                } else {
+                    nonUserActions.current--;
+                }
             });
             player.on('seeked', () => {
-                console.log('Video seeked to', player.currentTime());
+                console.log(2, nonUserActions.current)
+                if (nonUserActions.current == 0 && roomSessionConnected.current) {
+                    const message = {
+                        type: "CTRL",
+                        action: "SEEK",
+                        from: user,
+                        to: "!ALL!",
+                        currentTimeMs: player.currentTime() * 1000,
+                        timestamp: Date.now(),
+                    };
+                    socketRef.current.send(JSON.stringify(message));
+                } else {
+                    nonUserActions.current--;
+                }
             });
 
             // player.ready(() => {
@@ -336,13 +406,16 @@ const PlayVideoPage = () => {
                                 <Button variant="outline-success" onClick={() => navigate(`/watch/${videoId}/${currentRoom}`)}>
                                     Join Room
                                 </Button>
-                                <Button variant="outline-danger">
+                                <Button variant="outline-danger" onClick={handleDeleteRoom}>
                                     Delete Room
                                 </Button>
                             </>
                         )
                     ) : (
-                        <Button variant="outline-success" disabled={!currentRoom || currentRoom === ""} onClick={() => navigate(`/watch/${videoId}/${currentRoom}`)}>
+                        <Button 
+                        variant="outline-success" 
+                        disabled={!currentRoom || currentRoom === ""} 
+                        onClick={() => navigate(`/watch/${videoId}/${currentRoom}`)}>
                             Join Room
                         </Button>
                     )}
